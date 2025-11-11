@@ -1,0 +1,9 @@
+{
+  "botToken": "YOUR_DISCORD_BOT_TOKEN_HERE",
+  "guildId": "YOUR_DISCORD_SERVER_ID_HERE",
+  "councilRoleId": "THE_ID_OF_YOUR_CITY_COUNCIL_ROLE",
+  "adminRoleId": "THE_ID_OF_AN_ADMIN_ROLE_WHO_CAN_LINK_USERS",
+  "fivemServerUrl": "http://YOUR_FIVEM_SERVER_IP:PORT",
+  "fivemResourceName": "your_resource_name_here",
+  "fivemBotSecret": "THE_SAME_SECRET_YOU_PUT_IN_config.lua"
+}
