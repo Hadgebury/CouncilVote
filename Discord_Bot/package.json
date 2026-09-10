@@ -1,6 +1,6 @@
 {
   "name": "fivem-council-bot",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Discord bot for FiveM cross-voting",
   "main": "bot.js",
   "dependencies": {

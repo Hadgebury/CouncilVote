@@ -4,7 +4,7 @@ A secure, real-time, cross-platform legislative voting system bridging your **Fi
 
 ---
 
-## 🌟 Key Features (v2.0 Upgrades)
+## 🌟 Key Features (v1.3 Upgrades)
 
 * **Modern Discord Component Buttons**: Replaced legacy emoji reactions with interactive Discord Buttons (`[ 👍 Vote Yes ]`, `[ 👎 Vote No ]`, `[ ⚪ Abstain ]`). Provides instant, private ephemeral confirmations without relying on DMs.
 * **Synchronized Cross-Platform Voting**: Votes cast in-game or on Discord update the same ballot. Double voting across platforms is prevented using verified FiveM license identifiers.

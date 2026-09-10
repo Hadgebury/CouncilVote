@@ -1,5 +1,5 @@
 // ===================================================================
-//  FiveM & Discord Council Voting System - Discord Bot (v2.0)
+//  FiveM & Discord Council Voting System - Discord Bot (v1.3)
 // ===================================================================
 
 const { 

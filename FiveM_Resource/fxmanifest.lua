@@ -5,7 +5,7 @@ games {
 
 author 'Hadgebury'
 description 'Cross-platform In-Game and Discord Voting System'
-version '1.2.0'
+version '1.3.0'
 lua54 'yes'
 
 -- Security Fix: config.lua contains the Discord Webhook URL and Bot Secret.
