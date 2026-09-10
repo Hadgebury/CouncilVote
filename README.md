@@ -1,122 +1,154 @@
-# 🏛️ FiveM & Discord Council Voting System
+# 🏛️ FiveM & Discord City Council Voting System
 
-Welcome to the City Hall cross-platform voting system. This system allows authorized council members to vote on active motions either from within the FiveM server or directly from a Discord channel.
-
-This guide is split into two sections:
-1.  **Admin Installation Guide:** For server owners who need to set up the system.
-2.  **User Guide:** For council members who need to link their accounts and vote.
+A secure, real-time, cross-platform legislative voting system bridging your **FiveM GTA V server** and your **Discord community**. Council members can deliberate and vote seamlessly on active motions either in-game or directly from Discord with synchronized tallies and duplicate-vote prevention.
 
 ---
 
-## 1. Admin Installation Guide
+## 🌟 Key Features (v2.0 Upgrades)
 
-Follow these steps precisely to install and configure the voting system. You will have two main folders: `FiveM_Resource` (which goes on your game server) and `Discord_Bot` (which goes on your hosting/VPS).
-
-### Prerequisites
-* A dedicated FiveM server with admin access.
-* A Discord server with admin access.
-* A place to host a 24/7 Node.js bot (e.g., a VPS or hosting service).
-* Access to your server's firewall to open ports.
-
-### Step 1: Install the FiveM Resource
-1.  Take the entire `FiveM_Resource` folder and place it in your server's `resources` directory.
-2.  You can rename `FiveM_Resource` to something else (e.g., `[council-vote]`), but be sure to use that name in `config.json` later.
-
-3.  **Configure `FiveM_Resource/config.lua`:**
-    * `Config.WebhookURL`: Create a Webhook in your Discord council channel and paste the URL here.
-    * `Config.BotSecret`: Create a long, random, and secure password. You will need this for the Discord bot later.
-    * `Config.VotePermissionGroup`: Set the ACE group for casting votes (e.g., `council.voter`).
-    * `Config.StartVotePermissionGroup`: Set the ACE group for starting/ending votes (e.g., `council.leader`).
-
-4.  **Edit your `server.cfg`:**
-    * Add `ensure FiveM_Resource` (or whatever you named the folder).
-    * Add `ensure webserver` (this is critical for the bot to communicate).
-    * Add your ACE permissions. For example:
-        ```cfg
-        # Give leaders and admins the 'start vote' permission
-        add_ace group.admin council.leader allow
-        add_ace group.moderator council.leader allow
-
-        # Give council members the 'cast vote' permission
-        add_ace group.admin council.voter allow
-        add_ace group.moderator council.voter allow
-        add_ace group.council_member council.voter allow
-
-        # Add players to the groups
-        add_principal identifier.license:xxxxxx group.admin
-        add_principal identifier.license:yyyyyy group.moderator
-        add_principal identifier.license:zzzzzz group.council_member
-        ```
-5.  **Firewall:** Ensure your FiveM server's port (e.g., 30120) is open to incoming traffic so the Discord bot can send data to it.
-
-### Step 2: Set Up the Discord Bot
-1.  **Create Bot:** Go to the Discord Developer Portal, create a new application, and add a "Bot" to it.
-2.  **Get Token:** Reset and copy the bot's Token.
-3.  **Enable Intents:** In the "Bot" tab, enable both the **SERVER MEMBERS INTENT** and the **GUILD MESSAGE REACTIONS INTENT**.
-4.  **Invite Bot:** Go to "OAuth2" -> "URL Generator". Select `bot` and `applications.commands`. Give it **Send Messages**, **Manage Messages**, and **Read Message History** permissions. Copy the generated URL to invite the bot to your server.
-5.  **Get IDs:** Enable Developer Mode in Discord (Settings > Advanced).
-    * Right-click your server icon -> "Copy ID" (this is `guildId`).
-    * Right-click your City Council role -> "Copy ID" (this is `councilRoleId`).
-    * Right-click your Admin role -> "Copy ID" (this is `adminRoleId`).
-
-### Step 3: Configure & Run the Bot
-1.  Place the entire `Discord_Bot` folder (containing `bot.js`, `package.json`, and `config.json`) on your hosting server or VPS.
-2.  **Configure `Discord_Bot/config.json`:**
-    * `botToken`: The token you copied from Step 2.
-    * `guildId`: Your Discord server's ID.
-    * `councilRoleId`: Your City Council role's ID.
-    * `adminRoleId`: Your Admin role's ID.
-    * `fivemServerUrl`: The public IP and port of your FiveM server (e.g., `http://123.45.67.89:30120`).
-    * `fivemResourceName`: The name of the resource folder from Step 1 (e.g., `FiveM_Resource` or `council-vote`).
-    * `fivemBotSecret`: The *exact same* secret password you set in the FiveM `config.lua`.
-3.  **Install & Run:**
-    * Open a terminal in the `Discord_Bot` folder.
-    * Run `npm install` to install dependencies.
-    * Run `node bot.js` to start the bot. (It's recommended to use a process manager like `pm2` to keep it running 24/7).
-
-### Step 4: Final Check & Linking
-1.  In your Discord server, use the `/linkuser` command to link your own admin account.
-2.  You first need your FiveM license. You can find this in your server's logs or by using an admin tool.
-3.  Run the command:
-    `/linkuser user:@YourName license:license:123abcde...`
-
-You are now ready. The system is live.
+* **Modern Discord Component Buttons**: Replaced legacy emoji reactions with interactive Discord Buttons (`[ 👍 Vote Yes ]`, `[ 👎 Vote No ]`, `[ ⚪ Abstain ]`). Provides instant, private ephemeral confirmations without relying on DMs.
+* **Synchronized Cross-Platform Voting**: Votes cast in-game or on Discord update the same ballot. Double voting across platforms is prevented using verified FiveM license identifiers.
+* **Abstain & Quorum Support**: Support for formal abstentions and configurable quorum requirements (`Config.MinimumVotes`).
+* **Vote Changing**: Council members can change their ballot before the timer expires if enabled (`Config.AllowVoteChange`).
+* **In-Game UX & Audio**: Plays GTA frontend sound effects and on-screen feed notifications when votes start, conclude, or are cast.
+* **Chat Autocomplete**: Includes built-in `chat:addSuggestion` autocomplete hints for all in-game commands.
+* **Hardened Security**: Server configuration and secrets are protected against client cache dumping.
+* **Live Message Updates**: Automatically disables Discord voting buttons and posts final tallies with roll-call breakdowns when voting concludes.
 
 ---
 
-## 2. User Guide (For Council Members)
+## 📋 Command Reference
 
-Here is how to use the voting system.
+### In-Game Commands (FiveM)
+| Command | Permission Required | Description |
+| :--- | :--- | :--- |
+| `/startvote [motion] [seconds]` | `council.leader` | Initiates a council vote across in-game and Discord. Duration is optional (defaults to config). |
+| `/endvote` | `council.leader` | Immediately concludes and tallies the active vote early. |
+| `/castvote [yes/no/abstain]` | `council.voter` | Casts or updates your vote on the active motion. |
+| `/voteinfo` | Everyone | Displays the active motion, time remaining, and your cast ballot. |
 
-### 1. Linking Your Account (One-Time Setup)
-Before you can vote, an Admin must link your Discord account to your FiveM character.
+### Discord Slash Commands
+| Command | Permission Required | Description |
+| :--- | :--- | :--- |
+| `/startcouncilvote [question] [duration]` | Council Role / Admin | Starts a vote simultaneously on Discord and FiveM. |
+| `/endcouncilvote` | Council Role / Admin | Concludes the active vote early and disables Discord buttons. |
+| `/voteinfo` | Everyone | Checks status, time remaining, and live ballot count. |
+| `/linkuser [user] [license]` | Manage Guild / Admin | Links a Discord user to their FiveM `license:xxxxxx`. |
+| `/unlinkuser [user]` | Manage Guild / Admin | Removes a user's link from the database. |
+| `/listcouncil` | Manage Guild / Admin | Displays a list of all linked council members. |
 
-You cannot do this yourself. Please contact a server admin and provide them with your FiveM license. They will run a command to link you.
+---
 
-Until you are linked, your votes (both in-game and on Discord) will be rejected.
+## 🛠️ Installation & Setup Guide
 
-### 2. How to Vote
-When a vote is started by a council leader, a message will appear in-game and in the official Discord channel.
+### Part 1: FiveM Resource Setup
 
-**You can vote once from either location.**
+1. Place the `FiveM_Resource` folder inside your server's `resources` directory (e.g., `resources/[standalone]/FiveM_Resource`).
+2. Open `FiveM_Resource/config.lua` and configure your settings:
+   ```lua
+   -- Discord Webhook URL for vote announcements
+   Config.WebhookURL = "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
 
-* **To Vote In-Game:** Type `/castvote yes` or `/castvote no`
-* **To Vote In-Discord:** React to the vote message in the channel using the **👍 (Yes)** or **👎 (No)** emoji.
+   -- Shared secret between FiveM and your Discord bot (keep this private!)
+   Config.BotSecret = "A_STRONG_RANDOM_SECRET_KEY_HERE"
 
-Your first vote is the only one that counts. You cannot vote in-game and then change your vote on Discord (or vice-versa).
+   -- Permissions
+   Config.VotePermissionGroup = "council.voter"
+   Config.StartVotePermissionGroup = "council.leader"
 
-### 3. For Council Leaders (Starting/Ending Votes)
-You have two ways to start a vote:
+   -- Mechanics
+   Config.DefaultVoteDuration = 300   -- 5 minutes
+   Config.AllowAbstain = true          -- Enable abstain option
+   Config.AllowVoteChange = true       -- Allow changing vote before timer expires
+   Config.MinimumVotes = 0             -- Quorum requirement (0 to disable)
+   ```
+3. Add the resource and ACE permissions to your `server.cfg`:
+   ```cfg
+   # Start the resource
+   ensure FiveM_Resource
 
-* **In-Game (Recommended):**
-    `/startvote [The question you are voting on]`
-    This will start the vote timer and post the message to Discord.
+   # Council Leaders (Start & End Votes)
+   add_ace group.admin council.leader allow
+   add_ace group.moderator council.leader allow
 
-* **In-Discord:**
-    `/startcouncilvote question:[The question you are voting on]`
-    This will post the message to Discord and start the vote timer in-game.
+   # Council Members (Cast Votes)
+   add_ace group.admin council.voter allow
+   add_ace group.moderator council.voter allow
+   add_ace group.council_member council.voter allow
 
-To end any active vote early, type the following command **in-game**:
-`/endvote`
+   # Assign players to groups via FiveM license
+   add_principal identifier.license:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx group.admin
+   add_principal identifier.license:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy group.council_member
+   ```
+4. **Network / Firewall**: Ensure incoming HTTP traffic to your FXServer port (e.g., `30120`) is reachable from the machine hosting your Discord bot.
 
-This will immediately stop the vote, tally the results, and announce the outcome in-game and in Discord. If you do not end it early, the vote will automatically conclude when its timer runs out.
+---
+
+### Part 2: Discord Bot Setup
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a new Application.
+2. In the **Bot** tab:
+   * Create a Bot and copy the **Bot Token**.
+   * Under **Privileged Gateway Intents**, enable **Server Members Intent**.
+3. In the **OAuth2 -> URL Generator** tab:
+   * Select scopes: `bot` and `applications.commands`.
+   * Bot permissions: `Send Messages`, `Embed Links`, `Manage Messages`, `Use Application Commands`.
+   * Copy the generated invite link and authorize the bot into your Discord server.
+4. Place the `Discord_Bot` folder on your server or VPS.
+5. Open `Discord_Bot/config.json` and fill in your details:
+   ```json
+   {
+     "botToken": "YOUR_DISCORD_BOT_TOKEN",
+     "guildId": "YOUR_DISCORD_GUILD_SERVER_ID",
+     "councilRoleId": "YOUR_COUNCIL_ROLE_ID",
+     "adminRoleId": "YOUR_ADMIN_ROLE_ID",
+     "fivemServerUrl": "http://YOUR_SERVER_IP:30120",
+     "fivemResourceName": "FiveM_Resource",
+     "fivemBotSecret": "A_STRONG_RANDOM_SECRET_KEY_HERE"
+   }
+   ```
+   > **Note:** `fivemBotSecret` must match `Config.BotSecret` in `FiveM_Resource/config.lua`.
+
+6. Install dependencies and start the bot:
+   ```bash
+   cd Discord_Bot
+   npm install
+   node bot.js
+   ```
+   *(For 24/7 production use, run with PM2: `pm2 start bot.js --name "council-bot"`)*
+
+---
+
+### Part 3: Linking Accounts
+
+Council members must have their Discord account linked to their FiveM license to vote on Discord:
+
+1. Retrieve the member's FiveM license (from server logs, database, or txAdmin).
+2. An Admin runs the slash command in Discord:
+   ```text
+   /linkuser user:@CouncilMember license:license:1234567890abcdef1234567890abcdef12345678
+   ```
+3. Use `/listcouncil` to verify the registration.
+
+---
+
+## 🔒 Security Architecture
+
+* **No Client Leaks**: `config.lua` is strictly registered under `server_scripts`. Client files never receive webhook URLs or secrets.
+* **Shared Secret Authentication**: All incoming HTTP requests between Discord and FiveM require authentication against `Config.BotSecret`.
+* **Standardized FXServer Endpoints**: Uses FXServer's native `SetHttpHandler` with `application/json` payloads and proper status code propagation.
+* **Verified Identification**: Uses `GetPlayerIdentifierByType(source, 'license')` to guarantee consistent cross-platform identity matching.
+
+---
+
+## 📄 License & Attribution
+
+This project is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** license.
+
+### Terms Summary:
+* ✅ **Free Use**: You are free to download, use, run, and adapt this system for your community or server.
+* ❌ **Non-Commercial Only**: You may **NOT** sell, resell, lease, sub-license, or monetize this software or any derivatives. It cannot be sold on Tebex, Patreon, or bundled into paid server packages.
+* ⚠️ **Mandatory Credit**: You **MUST** attribute and credit **Hadgebury** as the original creator in your documentation, repository, or visible credits—even if the code is refactored, modified, or tailored for specific frameworks.
+* 🔄 **ShareAlike**: If you modify or adapt this project, your contributions must be distributed under the same license terms.
+
+See the full [LICENSE](file:///c:/Users/rocki/Documents/GitHub/CouncilVote/LICENSE) file for complete legal details.

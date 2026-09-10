@@ -1,278 +1,567 @@
--- Vote State Variables
+-- ===================================================================
+--  STATE VARIABLES
+-- ===================================================================
+
 local isVoteActive = false
 local voteQuestion = ""
+local voteDuration = 300
+local voteStartTime = 0
 local voteEndTime = 0
-local votes = {} -- Stores votes, e.g., votes["license:xxxxx"] = "yes"
-local discordMessageId = nil -- Stores the ID of the bot's message
+local votes = {} -- Format: votes[license] = { vote = 'yes'|'no'|'abstain', name = string, platform = 'in-game'|'discord' }
+local voteTimerToken = 0 -- Monotonic counter to invalidate old timeouts
 
--- Helper: Get a player's license identifier
+-- ===================================================================
+--  HELPER FUNCTIONS
+-- ===================================================================
+
+-- Safely get a player's FiveM license identifier
 local function GetIdentifier(source)
-    return GetPlayerIdentifier(source, 0) -- 0 = license
+    if not source or source == 0 then return nil end
+
+    -- Preferred native in modern FXServer
+    local license = GetPlayerIdentifierByType(source, 'license')
+    if license and #license > 0 then
+        if not string.match(license, '^license:') then
+            license = 'license:' .. license
+        end
+        return license
+    end
+
+    -- Fallback: iterate identifiers
+    local numIdentifiers = GetNumPlayerIdentifiers(source)
+    for i = 0, numIdentifiers - 1 do
+        local id = GetPlayerIdentifier(source, i)
+        if id and string.sub(id, 1, 8) == 'license:' then
+            return id
+        end
+    end
+
+    return nil
 end
 
 -- Helper: Check ACE permission
 local function HasPermission(source, group)
+    if source == 0 then return true end -- Server console always allowed
     return IsPlayerAceAllowed(source, group)
 end
 
--------------------------------------------------------------------
--- 1. COMMANDS (Start / End Vote)
--------------------------------------------------------------------
-
--- Command to START a vote
-RegisterCommand('startvote', function(source, args, raw)
-    local src = source
-
-    if not HasPermission(src, Config.StartVotePermissionGroup) then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'You do not have permission to start a vote.' } })
-        return
+-- Count current votes
+local function CountVotes()
+    local yesCount, noCount, abstainCount = 0, 0, 0
+    for _, data in pairs(votes) do
+        if data.vote == 'yes' then
+            yesCount = yesCount + 1
+        elseif data.vote == 'no' then
+            noCount = noCount + 1
+        elseif data.vote == 'abstain' then
+            abstainCount = abstainCount + 1
+        end
     end
+    return yesCount, noCount, abstainCount, (yesCount + noCount + abstainCount)
+end
 
-    if isVoteActive then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'A vote is already active.' } })
-        return
-    end
+-- Forward declaration
+local EndVote
 
-    local question = table.concat(args, " ")
-    if #question == 0 then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'Usage: /startvote [Question]' } })
-        return
-    end
+-- ===================================================================
+--  VOTE LIFECYCLE MANAGEMENT
+-- ===================================================================
 
-    -- Initialize vote
+-- Start a council vote
+local function StartVote(question, duration, starterName, starterPlatform)
+    if isVoteActive then return false, "A vote is already active." end
+
+    duration = tonumber(duration) or Config.DefaultVoteDuration or 300
+    if duration < 10 then duration = 10 end -- Minimum 10 seconds
+
     isVoteActive = true
     voteQuestion = question
-    votes = {} -- Clear old votes
-    voteEndTime = GetGameTimer() + (Config.VoteDuration * 1000)
+    voteDuration = duration
+    voteStartTime = GetGameTimer()
+    voteEndTime = voteStartTime + (duration * 1000)
+    votes = {}
 
-    -- Announce in-game
+    voteTimerToken = voteTimerToken + 1
+    local currentToken = voteTimerToken
+
+    local minutesText = string.format("%.1f", duration / 60)
+    if duration % 60 == 0 then
+        minutesText = tostring(math.floor(duration / 60))
+    end
+
+    -- 1. Announce to In-Game Chat
+    local announceMsg = string.format(
+        "A new City Council vote has been called by %s (%s)!\n" ..
+        "Motion: %s\n" ..
+        "Options: /castvote yes | /castvote no" .. (Config.AllowAbstain and " | /castvote abstain" or "") .. "\n" ..
+        "Time Remaining: %s minute(s) (%d seconds).",
+        starterName or "City Official",
+        starterPlatform or "City Hall",
+        question,
+        minutesText,
+        duration
+    )
+
     TriggerClientEvent('chat:addMessage', -1, {
         color = { 0, 200, 255 },
         multiline = true,
-        args = { 'CITY HALL', "A new vote has started!\nQuestion: " .. question .. "\nType /castvote yes or /castvote no to vote. You have " .. (Config.VoteDuration / 60) .. " minutes." }
+        args = { 'CITY HALL', announceMsg }
     })
 
-    -- Announce on Discord
-    -- This sends the webhook, but a *real bot* is needed to get the message ID back
-    SendVoteToDiscord(question)
+    -- 2. Trigger audio cues & notifications
+    if Config.SoundEffects then
+        TriggerClientEvent('council:playSound', -1, 'start')
+    end
+    TriggerClientEvent('council:notify', -1, '~y~Council Vote Started!~s~ Type /castvote to vote.')
 
-    -- Start timer to end the vote
-    SetTimeout(Config.VoteDuration * 1000, EndVote)
-
-end, false) -- 'false' because we do the permission check ourselves
-
--- Command to MANUALLY END a vote
-RegisterCommand('endvote', function(source, args, raw)
-    local src = source
-    if not HasPermission(src, Config.StartVotePermissionGroup) then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'You do not have permission to end the vote.' } })
-        return
+    -- 3. Post to Discord Webhook (if not already triggered directly by the Discord bot)
+    if starterPlatform ~= 'Discord' and Config.WebhookURL and Config.WebhookURL ~= "YOUR_DISCORD_WEBHOOK_URL_HERE" then
+        SendVoteEmbedToDiscord(question, duration, starterName)
     end
 
-    if not isVoteActive then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'No vote is active.' } })
-        return
-    end
+    -- 4. Set auto-conclusion timer
+    SetTimeout(duration * 1000, function()
+        if isVoteActive and voteTimerToken == currentToken then
+            EndVote("Timer Expired")
+        end
+    end)
 
-    EndVote()
-end, false)
+    return true, "Vote started successfully."
+end
 
--------------------------------------------------------------------
--- 2. VOTING LOGIC
--------------------------------------------------------------------
-
--- Receives a vote from a client
-RegisterNetEvent('council:castVote', function(vote)
-    local src = source
-    local identifier = GetIdentifier(src)
-
-    if not isVoteActive then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'No vote is currently active.' } })
-        return
-    end
-
-    if not HasPermission(src, Config.VotePermissionGroup) then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'You do not have permission to vote.' } })
-        return
-    end
-
-    if votes[identifier] then
-        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'You have already voted on this matter.' } })
-        return
-    end
-
-    -- Cast the vote
-    votes[identifier] = vote
-    TriggerClientEvent('chat:addMessage', src, { color = { 0, 255, 0 }, args = { 'SYSTEM', 'Your vote (' .. vote .. ') has been cast.' } })
-
-    -- Announce (anonymously)
-    TriggerClientEvent('chat:addMessage', -1, { color = { 0, 200, 255 }, args = { 'CITY HALL', 'A new vote has been cast in-game.' } })
-end)
-
--- Function to end the vote (called by timer or command)
-function EndVote()
-    if not isVoteActive then return end
+-- Conclude a vote
+EndVote = function(reason)
+    if not isVoteActive then return false, "No vote is currently active." end
 
     isVoteActive = false
-    local yesVotes = 0
-    local noVotes = 0
+    local yesCount, noCount, abstainCount, totalCount = CountVotes()
 
-    -- Tally votes
-    for identifier, vote in pairs(votes) do
-        if vote == 'yes' then
-            yesVotes = yesVotes + 1
-        elseif vote == 'no' then
-            noVotes = noVotes + 1
+    -- Determine outcome & check quorum
+    local outcome = "FAILED"
+    local outcomeColor = 15158332 -- Red
+
+    local quorumMet = true
+    if Config.MinimumVotes and Config.MinimumVotes > 0 and totalCount < Config.MinimumVotes then
+        quorumMet = false
+        outcome = "FAILED (QUORUM NOT MET)"
+        outcomeColor = 15105570 -- Orange
+    else
+        if yesCount > noCount then
+            outcome = "PASSED"
+            outcomeColor = 3066993 -- Green
+        elseif noCount > yesCount then
+            outcome = "FAILED"
+            outcomeColor = 15158332 -- Red
+        else
+            outcome = "TIED"
+            outcomeColor = 15844367 -- Gold / Yellow
         end
     end
 
-    local resultMessage = "VOTE CONCLUDED!\nQuestion: " .. voteQuestion .. "\n\nResults:\nYes: " .. yesVotes .. "\nNo: " .. noVotes
-    local outcome = (yesVotes > noVotes) and "PASSED" or "FAILED"
-    if yesVotes == noVotes then outcome = "TIED" end
-    resultMessage = resultMessage .. "\n\nOutcome: **" .. outcome .. "**"
+    -- Format result summary
+    local resultChat = string.format(
+        "COUNCIL VOTE CONCLUDED!\n" ..
+        "Motion: %s\n" ..
+        "Results: Yes: %d | No: %d%s | Total: %d\n" ..
+        (Config.MinimumVotes > 0 and string.format("Quorum Required: %d (%s)\n", Config.MinimumVotes, quorumMet and "Met" or "Not Met") or "") ..
+        "Outcome: %s",
+        voteQuestion,
+        yesCount,
+        noCount,
+        Config.AllowAbstain and (" | Abstain: " .. abstainCount) or "",
+        totalCount,
+        outcome
+    )
 
-    -- Announce results in-game
+    -- 1. Broadcast in-game
     TriggerClientEvent('chat:addMessage', -1, {
         color = { 0, 200, 255 },
         multiline = true,
-        args = { 'CITY HALL', resultMessage }
+        args = { 'CITY HALL', resultChat }
     })
 
-    -- Announce results on Discord
-    SendResultsToDiscord(resultMessage)
+    if Config.SoundEffects then
+        TriggerClientEvent('council:playSound', -1, 'end')
+    end
+    TriggerClientEvent('council:notify', -1, string.format("~b~Council Vote Concluded:~s~ %s", outcome))
 
-    -- Clear data
+    -- 2. Send detailed results to Discord
+    SendResultsEmbedToDiscord(voteQuestion, outcome, yesCount, noCount, abstainCount, totalCount, outcomeColor, quorumMet)
+
+    -- 3. Reset state
+    local concludedQuestion = voteQuestion
     voteQuestion = ""
     votes = {}
-    discordMessageId = nil
+
+    return true, "Vote concluded: " .. outcome
 end
 
--------------------------------------------------------------------
--- 3. DISCORD COMMUNICATION (Server -> Discord)
--------------------------------------------------------------------
+-- ===================================================================
+--  DISCORD WEBHOOK INTEGRATION
+-- ===================================================================
 
--- Sends the "Vote Started" message to your Discord webhook
-function SendVoteToDiscord(question)
+function SendVoteEmbedToDiscord(question, duration, starterName)
     local payload = {
         embeds = {
             {
-                title = "New City Council Vote Started!",
-                description = "**Question:**\n" .. question,
+                title = "🏛️ City Council Vote Started",
+                description = "**Motion Under Consideration:**\n" .. question,
                 color = 3447003, -- Blue
-                footer = { text = "Council members may vote in-game or via Discord." }
+                fields = {
+                    { name = "Started By", value = starterName or "Council Official", inline = true },
+                    { name = "Duration", value = string.format("%d seconds (%.1f mins)", duration, duration / 60), inline = true },
+                    { name = "Voting Instructions", value = "Council members may vote in-game with `/castvote` or click the voting buttons below on Discord.", inline = false }
+                },
+                footer = { text = "City Hall Legislative Voting System" },
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
             }
         }
     }
-    
-    -- This just "fires and forgets".
+
     PerformHttpRequest(Config.WebhookURL, function(err, text, headers)
-        if err ~= 200 then
-            print('^1[Council Vote] Could not send "Vote Started" message to Discord webhook.^0')
+        if err ~= 200 and err ~= 204 then
+            print('^1[Council Vote] Failed to send Discord webhook notice. HTTP Code: ' .. tostring(err) .. '^0')
         end
     end, 'POST', json.encode(payload), { ['Content-Type'] = 'application/json' })
 end
 
--- Sends the "Vote Ended" message to your Discord webhook
-function SendResultsToDiscord(resultMessage)
+function SendResultsEmbedToDiscord(question, outcome, yesCount, noCount, abstainCount, totalCount, colorHex, quorumMet)
+    if not Config.WebhookURL or Config.WebhookURL == "YOUR_DISCORD_WEBHOOK_URL_HERE" then return end
+
+    local fields = {
+        { name = "Outcome", value = "**" .. outcome .. "**", inline = true },
+        { name = "Total Ballots", value = tostring(totalCount), inline = true },
+        { name = "Tally Breakdown", value = string.format("✅ Yes: **%d**\n❌ No: **%d**%s", yesCount, noCount, Config.AllowAbstain and ("\n⚪ Abstain: **" .. abstainCount .. "**") or ""), inline = false }
+    }
+
+    if Config.MinimumVotes and Config.MinimumVotes > 0 then
+        table.insert(fields, { name = "Quorum Requirement", value = string.format("%d required (%s)", Config.MinimumVotes, quorumMet and "Met" or "Not Met"), inline = true })
+    end
+
+    if Config.ShowVoterNamesInResults and totalCount > 0 then
+        local voterBreakdown = ""
+        for _, data in pairs(votes) do
+            local icon = (data.vote == 'yes' and '✅') or (data.vote == 'no' and '❌') or '⚪'
+            voterBreakdown = voterBreakdown .. string.format("%s %s (%s)\n", icon, data.name or "Unknown", data.platform or "FiveM")
+        end
+        if #voterBreakdown > 1000 then
+            voterBreakdown = string.sub(voterBreakdown, 1, 997) .. "..."
+        end
+        table.insert(fields, { name = "Roll Call", value = voterBreakdown, inline = false })
+    end
+
     local payload = {
         embeds = {
             {
-                title = "Vote Concluded",
-                description = resultMessage,
-                color = (string.find(resultMessage, "PASSED") and 3066993) or 15158332 -- Green or Red
+                title = "📜 Council Vote Concluded",
+                description = "**Motion:**\n" .. question,
+                color = colorHex,
+                fields = fields,
+                footer = { text = "City Hall Archives" },
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
             }
         }
     }
+
     PerformHttpRequest(Config.WebhookURL, function() end, 'POST', json.encode(payload), { ['Content-Type'] = 'application/json' })
 end
 
--------------------------------------------------------------------
--- 4. DISCORD COMMUNICATION (Discord -> Server)
--------------------------------------------------------------------
+-- ===================================================================
+--  IN-GAME COMMANDS & EVENTS
+-- ===================================================================
 
--- Your Discord bot will send a POST request to this endpoint.
--- Endpoint URL: http://YOUR_SERVER_IP:PORT/resource_name/vote
-RegisterHttpHandler('vote', function(request, response)
-    
-    -- 1. Decode the request from the bot
-    local body = json.decode(request.body)
-    if not body then
-        response.send(400, 'Invalid request.')
+-- /startvote [question] [optional duration]
+RegisterCommand('startvote', function(source, args, raw)
+    local src = source
+
+    if not HasPermission(src, Config.StartVotePermissionGroup) then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'You lack permission to initiate a council vote.' } })
         return
     end
 
-    -- 2. Check for the shared secret
-    if not body.secret or body.secret ~= Config.BotSecret then
-        response.send(403, 'Invalid secret.') -- 403 Forbidden
+    if isVoteActive then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'A vote is already currently active.' } })
         return
     end
 
-    -- 3. Check if a vote is active
+    if #args == 0 then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'Usage: /startvote [Motion/Question] [Optional Duration in Seconds]' } })
+        return
+    end
+
+    -- Check if the last argument is a numeric duration
+    local duration = Config.DefaultVoteDuration or 300
+    local lastArg = tonumber(args[#args])
+    if lastArg and lastArg >= 10 and #args > 1 then
+        duration = lastArg
+        table.remove(args, #args)
+    end
+
+    local question = table.concat(args, " ")
+    local starterName = (src == 0) and "Server Console" or GetPlayerName(src)
+
+    StartVote(question, duration, starterName, "In-Game")
+end, false)
+
+-- /endvote: Conclude active vote early
+RegisterCommand('endvote', function(source, args, raw)
+    local src = source
+
+    if not HasPermission(src, Config.StartVotePermissionGroup) then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'You lack permission to conclude a council vote.' } })
+        return
+    end
+
     if not isVoteActive then
-        response.send(400, 'No vote active.')
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'No vote is currently active.' } })
         return
     end
 
-    -- 4. Get data from bot
-    -- Your bot *must* send the player's FiveM license
-    local identifier = body.identifier -- e.g., "license:1234abcd..."
-    local vote = body.vote -- e.g., "yes" or "no"
+    EndVote("Manually concluded by " .. ((src == 0) and "Console" or GetPlayerName(src)))
+end, false)
 
-    if not identifier or not vote then
-        response.send(400, 'Missing identifier or vote.')
+-- Event: In-game player casting vote
+RegisterNetEvent('council:castVote', function(voteChoice)
+    local src = source
+    local identifier = GetIdentifier(src)
+
+    if not isVoteActive then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'No council vote is currently active.' } })
         return
     end
 
-    -- 5. Check if already voted
-    if votes[identifier] then
-        response.send(200, 'Vote already cast.') -- 200 OK, just ignore
+    if not identifier then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'Could not verify your FiveM license.' } })
         return
     end
 
-    -- 6. Cast the vote
-    votes[identifier] = vote
-    
-    -- Announce in-game that a Discord vote was cast
-    TriggerClientEvent('chat:addMessage', -1, { color = { 88, 101, 242 }, args = { 'DISCORD', 'A vote was cast from Discord.' } })
+    if not HasPermission(src, Config.VotePermissionGroup) then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 0, 0 }, args = { 'SYSTEM', 'You do not have permission to vote in City Council.' } })
+        return
+    end
 
-    -- 7. Send "OK" back to the bot
-    response.send(200, 'Vote cast successfully.')
+    voteChoice = string.lower(voteChoice or '')
+    if voteChoice ~= 'yes' and voteChoice ~= 'no' and voteChoice ~= 'abstain' then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'Invalid vote option. Choose yes, no, or abstain.' } })
+        return
+    end
+
+    if voteChoice == 'abstain' and not Config.AllowAbstain then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'Abstaining is disabled for this council vote.' } })
+        return
+    end
+
+    local playerName = GetPlayerName(src)
+    local isUpdate = (votes[identifier] ~= nil)
+
+    if isUpdate and not Config.AllowVoteChange then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 100, 0 }, args = { 'SYSTEM', 'You have already voted on this motion and vote changing is disabled.' } })
+        return
+    end
+
+    -- Store or update vote
+    votes[identifier] = {
+        vote = voteChoice,
+        name = playerName,
+        platform = 'In-Game'
+    }
+
+    local feedback = isUpdate and string.format("Your vote has been updated to: %s", voteChoice:upper()) or string.format("Your vote (%s) has been recorded.", voteChoice:upper())
+    TriggerClientEvent('chat:addMessage', src, { color = { 0, 255, 100 }, args = { 'CITY HALL', feedback } })
+
+    if Config.SoundEffects then
+        TriggerClientEvent('council:playSound', src, 'cast')
+    end
+
+    if Config.BroadcastIndividualVotes then
+        TriggerClientEvent('chat:addMessage', -1, { color = { 0, 200, 255 }, args = { 'CITY HALL', 'A council ballot was cast in-game.' } })
+    end
 end)
 
--- This  handler allows the bot to START a vote
-RegisterHttpHandler('start-vote', function(request, response)
-    if isVoteActive then
-        response.send(400, 'A vote is already active.')
+-- Event: Player requests vote status info
+RegisterNetEvent('council:getVoteInfo', function()
+    local src = source
+    if not isVoteActive then
+        TriggerClientEvent('chat:addMessage', src, { color = { 255, 200, 0 }, args = { 'CITY HALL', 'There is currently no active council vote.' } })
         return
     end
 
-    local body = json.decode(request.body)
-    if not body or not body.secret or body.secret ~= Config.BotSecret then
-        response.send(403, 'Invalid secret.')
-        return
-    end
+    local remaining = math.max(0, math.floor((voteEndTime - GetGameTimer()) / 1000))
+    local identifier = GetIdentifier(src)
+    local myVote = identifier and votes[identifier] and votes[identifier].vote or "Not yet voted"
 
-    local question = body.question
-    if not question or #question == 0 then
-        response.send(400, 'Missing question.')
-        return
-    end
-
-    -- Manually trigger the vote start logic
-    isVoteActive = true
-    voteQuestion = question
-    votes = {} -- Clear old votes
-    voteEndTime = GetGameTimer() + (Config.VoteDuration * 1000)
-
-    -- Announce in-game
-    TriggerClientEvent('chat:addMessage', -1, {
+    TriggerClientEvent('chat:addMessage', src, {
         color = { 0, 200, 255 },
         multiline = true,
-        args = { 'CITY HALL', "A new vote has started from Discord!\nQuestion: " .. question .. "\nType /castvote yes or /castvote no. You have " .. (Config.VoteDuration / 60) .. " minutes." }
+        args = {
+            'CITY HALL',
+            string.format("Active Motion: %s\nTime Remaining: %d seconds\nYour Ballot: %s", voteQuestion, remaining, myVote:upper())
+        }
     })
-    
-    -- Start timer to end the vote
-    SetTimeout(Config.VoteDuration * 1000, EndVote)
+end)
 
-    response.send(200, 'Vote started successfully.')
+-- Cleanup on resource stop
+AddEventHandler('onResourceStop', function(resourceName)
+    if GetCurrentResourceName() == resourceName and isVoteActive then
+        TriggerClientEvent('chat:addMessage', -1, { color = { 255, 100, 0 }, args = { 'CITY HALL', 'The active council vote was cancelled due to a system restart.' } })
+    end
+end)
+
+-- ===================================================================
+--  HTTP HANDLER (Discord Bot -> FiveM Server)
+-- ===================================================================
+
+SetHttpHandler(function(request, response)
+    local path = request.path
+    local method = request.method
+
+    local function sendResponse(statusCode, data)
+        response.writeHead(statusCode, {
+            ["Content-Type"] = "application/json",
+            ["Access-Control-Allow-Origin"] = "*"
+        })
+        if type(data) == "table" then
+            response.send(json.encode(data))
+        else
+            response.send(tostring(data))
+        end
+    end
+
+    -- Pre-flight CORS support
+    if method == 'OPTIONS' then
+        response.writeHead(200, {
+            ["Access-Control-Allow-Origin"] = "*",
+            ["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS",
+            ["Access-Control-Allow-Headers"] = "Content-Type"
+        })
+        response.send('')
+        return
+    end
+
+    -- Health / Status query
+    if path == '/status' or path == '/health' then
+        local yesCount, noCount, abstainCount, totalCount = CountVotes()
+        local remaining = 0
+        if isVoteActive then
+            remaining = math.max(0, math.floor((voteEndTime - GetGameTimer()) / 1000))
+        end
+        sendResponse(200, {
+            active = isVoteActive,
+            question = voteQuestion,
+            timeRemaining = remaining,
+            duration = voteDuration,
+            tally = { yes = yesCount, no = noCount, abstain = abstainCount, total = totalCount }
+        })
+        return
+    end
+
+    -- POST Routes
+    if method == 'POST' then
+        request.setDataHandler(function(rawBody)
+            local ok, body = pcall(json.decode, rawBody or "")
+            if not ok or not body then
+                sendResponse(400, { success = false, message = "Malformed JSON request body." })
+                return
+            end
+
+            -- Validate secret
+            if not body.secret or body.secret ~= Config.BotSecret then
+                sendResponse(403, { success = false, message = "Unauthorized: Invalid secret." })
+                return
+            end
+
+            -- 1. Cast Vote from Discord
+            if path == '/vote' then
+                if not isVoteActive then
+                    sendResponse(400, { success = false, message = "No vote is currently active." })
+                    return
+                end
+
+                local identifier = body.identifier
+                local voteChoice = string.lower(body.vote or '')
+                local voterName = body.name or "Discord User"
+
+                if not identifier or not voteChoice then
+                    sendResponse(400, { success = false, message = "Missing identifier or vote choice." })
+                    return
+                end
+
+                if voteChoice ~= 'yes' and voteChoice ~= 'no' and voteChoice ~= 'abstain' then
+                    sendResponse(400, { success = false, message = "Invalid vote option. Must be yes, no, or abstain." })
+                    return
+                end
+
+                if voteChoice == 'abstain' and not Config.AllowAbstain then
+                    sendResponse(400, { success = false, message = "Abstaining is not permitted for this vote." })
+                    return
+                end
+
+                local isUpdate = (votes[identifier] ~= nil)
+                if isUpdate and not Config.AllowVoteChange then
+                    sendResponse(409, { success = false, message = "You have already cast a vote on this motion." })
+                    return
+                end
+
+                votes[identifier] = {
+                    vote = voteChoice,
+                    name = voterName,
+                    platform = 'Discord'
+                }
+
+                if Config.BroadcastIndividualVotes then
+                    TriggerClientEvent('chat:addMessage', -1, { color = { 88, 101, 242 }, args = { 'DISCORD', 'A council ballot was cast from Discord.' } })
+                end
+
+                local yesCount, noCount, abstainCount, totalCount = CountVotes()
+                sendResponse(200, {
+                    success = true,
+                    message = isUpdate and "Vote updated successfully." or "Vote recorded successfully.",
+                    tally = { yes = yesCount, no = noCount, abstain = abstainCount, total = totalCount }
+                })
+                return
+
+            -- 2. Start Vote from Discord
+            elseif path == '/start-vote' then
+                if isVoteActive then
+                    sendResponse(400, { success = false, message = "A vote is already currently active in-game." })
+                    return
+                end
+
+                local question = body.question
+                local duration = tonumber(body.duration) or Config.DefaultVoteDuration or 300
+                local starterName = body.starterName or "Discord Council Member"
+
+                if not question or #question == 0 then
+                    sendResponse(400, { success = false, message = "Missing question string." })
+                    return
+                end
+
+                local success, err = StartVote(question, duration, starterName, "Discord")
+                if success then
+                    sendResponse(200, { success = true, message = "Vote started successfully.", duration = duration })
+                else
+                    sendResponse(400, { success = false, message = err })
+                end
+                return
+
+            -- 3. Conclude Vote from Discord
+            elseif path == '/end-vote' then
+                if not isVoteActive then
+                    sendResponse(400, { success = false, message = "No vote is currently active." })
+                    return
+                end
+
+                local requester = body.name or "Discord Admin"
+                local success, msg = EndVote("Ended by " .. requester .. " via Discord")
+                sendResponse(200, { success = true, message = msg })
+                return
+
+            else
+                sendResponse(404, { success = false, message = "Endpoint not found." })
+                return
+            end
+        end)
+    else
+        sendResponse(405, { success = false, message = "Method Not Allowed." })
+    end
 end)
